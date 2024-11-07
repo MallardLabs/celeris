@@ -1,247 +1,174 @@
-from discord.ext import commands, tasks
+from discord.ext import commands
 import discord
 from discord import app_commands
+from helpers.embed_helpers import create_basic_embed, create_error_embed, create_success_embed
+from typing import Optional, List
+from sqlalchemy import select, or_
 from models.database import Organization, OrganizationMember, PaymentSchedule, IntervalType
-from datetime import datetime, timedelta
-
-def is_admin():
-    def predicate(interaction: discord.Interaction) -> bool:
-        return interaction.user.guild_permissions.administrator
-    return app_commands.check(predicate)
 
 class Organizations(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.db = bot.db_manager.Session()
-        self.points_manager = bot.points_manager
-        self.process_payments.start()
+        self.db = bot.db_manager
 
-    def cog_unload(self):
-        self.process_payments.cancel()
+    async def get_user_organizations(self, user_id: str) -> List[Organization]:
+        """Helper method to get organizations for a user"""
+        async with self.db.session() as session:
+            # Get orgs where user is owner or member
+            orgs = await session.execute(
+                select(Organization).where(
+                    or_(
+                        Organization.owner_id == str(user_id),
+                        Organization.id.in_(
+                            select(OrganizationMember.organization_id).where(
+                                OrganizationMember.user_id == str(user_id)
+                            )
+                        )
+                    )
+                )
+            )
+            return orgs.scalars().all()
 
-    @app_commands.guild_only()
-    @app_commands.command(name="create_org", description="Create a new organization")
-    @app_commands.describe(name="Name of the organization")
-    async def create_org(self, interaction: discord.Interaction, name: str):
-        await interaction.response.defer(ephemeral=True)
-        
-        # Check if org already exists
-        existing_org = self.db.query(Organization).filter_by(name=name).first()
-        if existing_org:
-            await interaction.followup.send("An organization with this name already exists!", ephemeral=True)
-            return
+    async def get_organization_members(self, org_id: int) -> List[OrganizationMember]:
+        """Helper method to get members of an organization"""
+        async with self.db.session() as session:
+            members = await session.execute(
+                select(OrganizationMember).where(
+                    OrganizationMember.organization_id == org_id
+                )
+            )
+            return members.scalars().all()
 
-        org = Organization(name=name, owner_id=str(interaction.user.id))
-        self.db.add(org)
-        self.db.commit()
+    async def get_organization_schedules(self, org_id: int) -> List[PaymentSchedule]:
+        """Helper method to get payment schedules for an organization"""
+        async with self.db.session() as session:
+            schedules = await session.execute(
+                select(PaymentSchedule).where(
+                    PaymentSchedule.organization_id == org_id
+                )
+            )
+            return schedules.scalars().all()
 
-        await interaction.followup.send(f"Organization '{name}' created successfully!", ephemeral=True)
-
-    @app_commands.guild_only()
-    @app_commands.command(name="delete_org", description="Delete an organization")
-    @app_commands.describe(name="Name of the organization to delete")
-    async def delete_org(self, interaction: discord.Interaction, name: str):
-        await interaction.response.defer(ephemeral=True)
-        
-        org = self.db.query(Organization).filter_by(name=name).first()
-        if not org:
-            await interaction.followup.send("Organization not found!", ephemeral=True)
-            return
-
-        if str(interaction.user.id) != org.owner_id:
-            await interaction.followup.send("Only the organization owner can delete it!", ephemeral=True)
-            return
-
-        self.db.delete(org)
-        self.db.commit()
-
-        await interaction.followup.send(f"Organization '{name}' has been deleted.", ephemeral=True)
-
-    @app_commands.guild_only()
-    @app_commands.command(name="add_member", description="Add a member to an organization")
+    @app_commands.command(name="add_member", description="Add a member to your organization")
     @app_commands.describe(
-        org_name="Name of the organization",
-        user="User to add to the organization"
+        user="The user to add to your organization",
+        organization="The organization to add them to"
     )
-    async def add_member(self, interaction: discord.Interaction, org_name: str, user: discord.Member):
-        await interaction.response.defer(ephemeral=True)
-        
-        org = self.db.query(Organization).filter_by(name=org_name).first()
-        if not org:
-            await interaction.followup.send("Organization not found!", ephemeral=True)
-            return
-
-        if str(interaction.user.id) != org.owner_id:
-            await interaction.followup.send("Only the organization owner can add members!", ephemeral=True)
-            return
-
-        # Check if user is already a member
-        existing_member = self.db.query(OrganizationMember).filter_by(
-            organization_id=org.id,
-            user_id=str(user.id)
-        ).first()
-        
-        if existing_member:
-            await interaction.followup.send("User is already a member of this organization!", ephemeral=True)
-            return
-
-        member = OrganizationMember(organization_id=org.id, user_id=str(user.id))
-        self.db.add(member)
-        self.db.commit()
-
-        await interaction.followup.send(f"Added {user.mention} to organization '{org_name}'!", ephemeral=True)
-
-    @app_commands.guild_only()
-    @app_commands.command(name="remove_member", description="Remove a member from an organization")
-    @app_commands.describe(
-        org_name="Name of the organization",
-        user="User to remove from the organization"
-    )
-    async def remove_member(self, interaction: discord.Interaction, org_name: str, user: discord.Member):
-        await interaction.response.defer(ephemeral=True)
-        
-        org = self.db.query(Organization).filter_by(name=org_name).first()
-        if not org:
-            await interaction.followup.send("Organization not found!", ephemeral=True)
-            return
-
-        if str(interaction.user.id) != org.owner_id:
-            await interaction.followup.send("Only the organization owner can remove members!", ephemeral=True)
-            return
-
-        member = self.db.query(OrganizationMember).filter_by(
-            organization_id=org.id,
-            user_id=str(user.id)
-        ).first()
-        
-        if not member:
-            await interaction.followup.send("User is not a member of this organization!", ephemeral=True)
-            return
-
-        self.db.delete(member)
-        self.db.commit()
-
-        await interaction.followup.send(f"Removed {user.mention} from organization '{org_name}'!", ephemeral=True)
-
-    @app_commands.guild_only()
-    @app_commands.command(name="schedule_payment", description="Schedule automated payments")
-    @app_commands.describe(
-        org_name="Name of the organization",
-        user="User to receive payments (optional)",
-        amount="Amount of Points to pay",
-        interval_type="Payment interval type",
-        interval_value="Interval value (in selected units)"
-    )
-    @app_commands.choices(interval_type=[
-        app_commands.Choice(name="Minutes", value="minutes"),
-        app_commands.Choice(name="Hours", value="hours"),
-        app_commands.Choice(name="Days", value="days"),
-    ])
-    async def schedule_payment(
+    async def add_member(
         self, 
         interaction: discord.Interaction, 
-        org_name: str, 
-        amount: int, 
-        interval_type: str,
-        interval_value: int,
-        user: discord.Member = None
+        user: discord.Member,
+        organization: str
     ):
-        await interaction.response.defer(ephemeral=True)
-        
-        org = self.db.query(Organization).filter_by(name=org_name).first()
-        if not org:
-            await interaction.followup.send("Organization not found!", ephemeral=True)
-            return
-
-        if str(interaction.user.id) != org.owner_id:
-            await interaction.followup.send("Only the organization owner can schedule payments!", ephemeral=True)
-            return
-
-        schedule = PaymentSchedule(
-            organization_id=org.id,
-            user_id=str(user.id) if user else None,
-            amount=amount,
-            interval_type=IntervalType(interval_type),
-            interval_value=interval_value
-        )
-        
-        self.db.add(schedule)
-        self.db.commit()
-
-        target = user.mention if user else f"all members of '{org_name}'"
-        await interaction.followup.send(
-            f"Payment schedule created: {amount:,} Points to {target} "
-            f"every {interval_value} {interval_type}",
-            ephemeral=True
-        )
-
-    @app_commands.guild_only()
-    @app_commands.command(name="list_org_members", description="List all members of an organization")
-    @app_commands.describe(org_name="Name of the organization")
-    async def list_org_members(self, interaction: discord.Interaction, org_name: str):
-        await interaction.response.defer(ephemeral=True)
-        
-        org = self.db.query(Organization).filter_by(name=org_name).first()
-        if not org:
-            await interaction.followup.send("Organization not found!", ephemeral=True)
-            return
-
-        members = self.db.query(OrganizationMember).filter_by(organization_id=org.id).all()
-        if not members:
-            await interaction.followup.send(f"No members found in organization '{org_name}'", ephemeral=True)
-            return
-
-        member_list = []
-        for member in members:
-            user = interaction.guild.get_member(int(member.user_id))
-            if user:
-                member_list.append(f"• {user.mention}")
-
-        embed = discord.Embed(
-            title=f"Members of {org_name}",
-            description="\n".join(member_list) if member_list else "No active members found",
-            color=discord.Color.blue()
-        )
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @tasks.loop(minutes=1)
-    async def process_payments(self):
+        session = self.db.Session()
         try:
-            schedules = self.db.query(PaymentSchedule).all()
-            for schedule in schedules:
-                # Calculate next payment time
-                delta = timedelta(**{schedule.interval_type.value: schedule.interval_value})
-                next_payment = schedule.last_paid_at + delta
-                
-                if datetime.utcnow() >= next_payment:
-                    if schedule.user_id:  # Individual payment
-                        success = await self.points_manager.add_points(
-                            int(schedule.user_id),
-                            schedule.amount
-                        )
-                        if success:
-                            schedule.last_paid_at = datetime.utcnow()
-                    else:  # Organization-wide payment
-                        members = self.db.query(OrganizationMember).filter_by(
-                            organization_id=schedule.organization_id
-                        ).all()
-                        
-                        for member in members:
-                            success = await self.points_manager.add_points(
-                                int(member.user_id),
-                                schedule.amount
-                            )
-                            if success:
-                                schedule.last_paid_at = datetime.utcnow()
-                    
-                    self.db.commit()
-        except Exception as e:
-            print(f"Error processing payments: {e}")
+            # Check if org exists and user is owner
+            org = session.query(Organization).filter_by(
+                name=organization,
+                owner_id=str(interaction.user.id)
+            ).first()
+            
+            if not org:
+                await interaction.response.send_message(
+                    embed=create_error_embed(
+                        title="Not Found",
+                        description="You don't own an organization with that name."
+                    ),
+                    ephemeral=True
+                )
+                return
 
-    @process_payments.before_loop
-    async def before_process_payments(self):
-        await self.bot.wait_until_ready()
+            # Check if user is already a member
+            existing_member = session.query(OrganizationMember).filter_by(
+                organization_id=org.id,
+                user_id=str(user.id)
+            ).first()
+            
+            if existing_member:
+                await interaction.response.send_message(
+                    embed=create_error_embed(
+                        title="Already Member",
+                        description=f"{user.mention} is already a member of {organization}!"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            # Add the member
+            member = OrganizationMember(
+                organization_id=org.id,
+                user_id=str(user.id)
+            )
+            session.add(member)
+            session.commit()
+
+            await interaction.response.send_message(
+                embed=create_success_embed(
+                    title="Member Added",
+                    description=f"Successfully added {user.mention} to {organization}!"
+                ),
+                ephemeral=True
+            )
+        finally:
+            session.close()
+
+    @app_commands.command(name="remove_member", description="Remove a member from your organization")
+    @app_commands.describe(
+        user="The user to remove from your organization",
+        organization="The organization to remove them from"
+    )
+    async def remove_member(
+        self, 
+        interaction: discord.Interaction, 
+        user: discord.Member,
+        organization: str
+    ):
+        session = self.db.Session()
+        try:
+            # Check if org exists and user is owner
+            org = session.query(Organization).filter_by(
+                name=organization,
+                owner_id=str(interaction.user.id)
+            ).first()
+            
+            if not org:
+                await interaction.response.send_message(
+                    embed=create_error_embed(
+                        title="Not Found",
+                        description="You don't own an organization with that name."
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            # Find and remove the member
+            member = session.query(OrganizationMember).filter_by(
+                organization_id=org.id,
+                user_id=str(user.id)
+            ).first()
+            
+            if not member:
+                await interaction.response.send_message(
+                    embed=create_error_embed(
+                        title="Not a Member",
+                        description=f"{user.mention} is not a member of {organization}!"
+                    ),
+                    ephemeral=True
+                )
+                return
+
+            session.delete(member)
+            session.commit()
+
+            await interaction.response.send_message(
+                embed=create_success_embed(
+                    title="Member Removed",
+                    description=f"Successfully removed {user.mention} from {organization}!"
+                ),
+                ephemeral=True
+            )
+        finally:
+            session.close()
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(Organizations(bot))

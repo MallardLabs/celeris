@@ -7,6 +7,7 @@ from datetime import datetime
 Base = declarative_base()
 
 class IntervalType(enum.Enum):
+    SECONDS = "seconds"
     MINUTES = "minutes"
     HOURS = "hours"
     DAYS = "days"
@@ -42,5 +43,7 @@ class PaymentSchedule(Base):
     interval_type = Column(Enum(IntervalType))
     interval_value = Column(Integer)
     last_paid_at = Column(DateTime, default=datetime.utcnow)
+    total_points = Column(Integer)  # Total points allocated to this schedule
+    points_paid = Column(Integer, default=0)  # Points already paid out
     
     organization = relationship("Organization", back_populates="payment_schedules")

@@ -1,66 +1,58 @@
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Enum, DateTime
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
-import enum
-from datetime import datetime
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from models.database import Base
 import os
-
-Base = declarative_base()
-
-class IntervalType(enum.Enum):
-    MINUTES = "minutes"
-    HOURS = "hours"
-    DAYS = "days"
-
-class Organization(Base):
-    __tablename__ = 'organizations'
-    
-    id = Column(Integer, primary_key=True)
-    name = Column(String, unique=True)
-    owner_id = Column(String)  # Discord user ID
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    members = relationship("OrganizationMember", back_populates="organization", cascade="all, delete-orphan")
-    payment_schedules = relationship("PaymentSchedule", back_populates="organization", cascade="all, delete-orphan")
-
-class OrganizationMember(Base):
-    __tablename__ = 'organization_members'
-    
-    id = Column(Integer, primary_key=True)
-    organization_id = Column(Integer, ForeignKey('organizations.id'))
-    user_id = Column(String)  # Discord user ID
-    joined_at = Column(DateTime, default=datetime.utcnow)
-    
-    organization = relationship("Organization", back_populates="members")
-class PaymentSchedule(Base):
-    __tablename__ = 'payment_schedules'
-    
-    id = Column(Integer, primary_key=True)
-    organization_id = Column(Integer, ForeignKey('organizations.id'))
-    user_id = Column(String, nullable=True)  # Discord user ID, null if org-wide
-    amount = Column(Integer)
-    interval_type = Column(Enum(IntervalType))
-    interval_value = Column(Integer)
-    last_paid_at = Column(DateTime, default=datetime.utcnow)
-    total_points = Column(Integer)  # Total points allocated to this schedule
-    points_paid = Column(Integer, default=0)  # Points already paid out
+from sqlalchemy import text
 
 class DatabaseManager:
     _instance = None
 
     def __init__(self, db_url):
-        # Extract filename from SQLite URL (e.g., "sqlite:///your_database.db" -> "your_database.db")
-        if db_url.startswith('sqlite:///'):
-            db_file = db_url[10:]
-            # Delete existing database file if it exists
+        self.db_url = db_url
+        self.engine = None
+        self.Session = None
+        self.initialize_database()
+
+    def initialize_database(self):
+        if self.db_url.startswith('sqlite:///'):
+            db_file = self.db_url[10:]
+            db_dir = os.path.dirname(db_file)
+            
+            # Create directory if it doesn't exist
+            if db_dir and not os.path.exists(db_dir):
+                os.makedirs(db_dir, mode=0o755)
+            
+            # Remove existing database if it's readonly
             if os.path.exists(db_file):
-                os.remove(db_file)
-                
-        self.engine = create_engine(db_url)
+                try:
+                    # Test write permissions
+                    with open(db_file, 'a'):
+                        pass
+                except PermissionError:
+                    os.chmod(db_file, 0o666)  # Set read/write permissions
+                    if os.path.exists(db_file):
+                        os.remove(db_file)
+        
+        # Create engine with proper permissions
+        self.engine = create_engine(
+            self.db_url,
+            connect_args={'check_same_thread': False},
+            echo=True  # Enable SQL logging
+        )
+        
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
+
+        # Verify write permissions by testing a simple write
+        try:
+            session = self.Session()
+            session.execute(text("SELECT 1"))
+            session.commit()
+        except Exception as e:
+            print(f"Database write test failed: {e}")
+            raise
+        finally:
+            session.close()
 
     @classmethod
     def get_instance(cls, db_url=None):
@@ -68,16 +60,12 @@ class DatabaseManager:
             cls._instance = cls(db_url)
         return cls._instance
 
-    def get_session(self):
-        return self.Session()
-
     def reset_database(self):
-        """Reset the database - USE WITH CAUTION"""
-        # Extract filename from SQLite URL
-        if str(self.engine.url).startswith('sqlite:///'):
-            db_file = str(self.engine.url)[10:]
-            # Delete existing database file if it exists
+        """Reset the database completely"""
+        if self.db_url.startswith('sqlite:///'):
+            db_file = self.db_url[10:]
             if os.path.exists(db_file):
+                os.chmod(db_file, 0o666)  # Ensure write permissions
                 os.remove(db_file)
         
         Base.metadata.create_all(self.engine)

@@ -107,8 +107,25 @@ class DiscordBot(commands.Bot):
             f"Running on: {platform.system()} {platform.release()} ({os.name})"
         )
         self.logger.info("-------------------")
-        # Load each extension
-        await self.load_cogs()
+        try:
+            # Initialize database with proper path and permissions
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            db_path = os.path.join(current_dir, 'celeris.db')
+            db_url = f"sqlite:///{db_path}"
+            
+            # Ensure directory is writable
+            os.chmod(current_dir, 0o755)
+            
+            self.db_manager = DatabaseManager.get_instance(db_url)
+            print("Database initialized")
+
+            # Load extensions
+            await self.load_extension("cogs.menu")
+            print("Extensions loaded")
+            
+        except Exception as e:
+            print(f"Error in setup: {e}")
+            raise  # Re-raise to see full traceback
 
     async def on_ready(self) -> None:
         """|coro|

@@ -1,5 +1,13 @@
 from discord import Embed, Color
 
+def calculate_schedule_progress(points_paid: int, total_points: int) -> tuple[float, str]:
+    """Calculate progress percentage and generate progress bar"""
+    progress = (points_paid / total_points) * 100
+    filled_blocks = int((progress / 100) * 10)
+    empty_blocks = 10 - filled_blocks
+    progress_bar = '█' * filled_blocks + '░' * empty_blocks
+    return progress, progress_bar
+
 def create_basic_embed(title: str, description: str = None, add_footer: bool = False) -> Embed:
     embed = Embed(
         title=title,

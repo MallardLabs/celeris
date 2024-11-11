@@ -12,6 +12,20 @@ class IntervalType(enum.Enum):
     DAYS = "d"
     MONTHS = "mm"
 
+    def to_seconds(self) -> int:
+        """Convert interval type to seconds"""
+        if self == IntervalType.SECONDS:
+            return 1
+        elif self == IntervalType.MINUTES:
+            return 60
+        elif self == IntervalType.HOURS:
+            return 3600
+        elif self == IntervalType.DAYS:
+            return 86400
+        elif self == IntervalType.MONTHS:
+            return 2592000  # Approximately 30 days
+        return 0
+
 class Organization(Base):
     __tablename__ = 'organizations'
     

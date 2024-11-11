@@ -4,29 +4,25 @@ from discord import app_commands
 from helpers.embed_helpers import create_basic_embed, create_error_embed, create_success_embed
 from typing import Optional, List
 from sqlalchemy import select, or_
-from models.database import Organization, OrganizationMember, PaymentSchedule, IntervalType
+from models.database import Organization, OrganizationMember, PaymentSchedule, IntervalType, PaymentScheduleMember
 from datetime import datetime
 
 class ConfirmationView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=60)  # 60 second timeout
+        super().__init__(timeout=60.0)
         self.value = None
 
-    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.success, emoji="✅")
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.value = True
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(view=self)
         self.stop()
+        await interaction.response.defer()
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, emoji="❌")
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.grey)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.value = False
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(view=self)
         self.stop()
+        await interaction.response.defer()
 
     async def on_timeout(self):
         self.value = False
@@ -53,67 +49,28 @@ class ConfirmationView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=view)
 
 class Organizations(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot):
         self.bot = bot
         self.db = bot.db_manager
 
-    async def get_user_organizations(self, user_id: str) -> List[Organization]:
-        """Helper method to get organizations for a user"""
-        async with self.db.session() as session:
-            # Get orgs where user is owner or member
-            orgs = await session.execute(
-                select(Organization).where(
-                    or_(
-                        Organization.owner_id == str(user_id),
-                        Organization.id.in_(
-                            select(OrganizationMember.organization_id).where(
-                                OrganizationMember.user_id == str(user_id)
-                            )
-                        )
-                    )
-                )
-            )
-            return orgs.scalars().all()
-
-    async def get_organization_members(self, org_id: int) -> List[OrganizationMember]:
-        """Helper method to get members of an organization"""
-        async with self.db.session() as session:
-            members = await session.execute(
-                select(OrganizationMember).where(
-                    OrganizationMember.organization_id == org_id
-                )
-            )
-            return members.scalars().all()
-
-    async def get_organization_schedules(self, org_id: int) -> List[PaymentSchedule]:
-        """Helper method to get payment schedules for an organization"""
-        async with self.db.session() as session:
-            schedules = await session.execute(
-                select(PaymentSchedule).where(
-                    PaymentSchedule.organization_id == org_id
-                )
-            )
-            return schedules.scalars().all()
-
     @app_commands.command(
-        name="add_member",
+        name="add_to_org",
         description="Add a user to an organization (Owner only)"
     )
     @app_commands.describe(
         organization_name="Name of the organization",
         user="The user to add to the organization"
     )
-    async def add_member(
+    async def add_to_org(
         self,
         interaction: discord.Interaction,
         organization_name: str,
         user: discord.Member
     ):
-        session = self.db.Session()
+        session = self.bot.db_manager.Session()
         try:
             # Check if org exists and user is owner
             org = session.query(Organization).filter_by(name=organization_name).first()
-            
             if not org:
                 await interaction.response.send_message(
                     embed=create_error_embed(
@@ -185,236 +142,413 @@ class Organizations(commands.Cog):
             session.close()
 
     @app_commands.command(
-        name="remove_member",
-        description="Remove a member from your organization (Owner only)"
+        name="remove_from_org",
+        description="Remove a user from an organization"
     )
     @app_commands.describe(
         organization_name="Name of the organization",
-        user="The user to remove from the organization"
+        user="User to remove from the organization"
     )
-    async def remove_member(
+    async def remove_from_org(
         self,
         interaction: discord.Interaction,
         organization_name: str,
         user: discord.Member
     ):
-        session = self.db.Session()
+        await interaction.response.defer(ephemeral=True)
+        
+        session = self.bot.db_manager.Session()
         try:
-            # Check if org exists and user is owner
+            # Find the organization
             org = session.query(Organization).filter_by(name=organization_name).first()
-            
             if not org:
-                await interaction.response.send_message(
-                    embed=create_error_embed(
-                        title="Organization Not Found",
-                        description=f"No organization named '{organization_name}' exists."
-                    ),
-                    ephemeral=True
-                )
-                return
+                raise ValueError(f"Organization '{organization_name}' not found!")
 
-            # Verify the command user is the owner
+            # Check if user is the owner
             if str(interaction.user.id) != org.owner_id:
-                await interaction.response.send_message(
-                    embed=create_error_embed(
-                        title="Permission Denied",
-                        description="You must be the organization owner to remove members."
-                    ),
-                    ephemeral=True
-                )
-                return
+                raise ValueError("Only the organization owner can remove members!")
 
-            # Can't remove the owner
-            if str(user.id) == org.owner_id:
-                await interaction.response.send_message(
-                    embed=create_error_embed(
-                        title="Cannot Remove Owner",
-                        description="The organization owner cannot be removed. Use `/transfer_ownership` to change ownership first."
-                    ),
-                    ephemeral=True
-                )
-                return
-
-            # Check if user is a member
+            # Find the member
             member = session.query(OrganizationMember).filter_by(
                 organization_id=org.id,
                 user_id=str(user.id)
             ).first()
             
             if not member:
-                await interaction.response.send_message(
-                    embed=create_error_embed(
-                        title="Not a Member",
-                        description=f"{user.mention} is not a member of {organization_name}!"
-                    ),
-                    ephemeral=True
-                )
-                return
+                raise ValueError(f"{user.name} is not a member of {organization_name}!")
 
-            # Remove member from payment schedules
-            session.query(PaymentScheduleMember).filter(
-                PaymentScheduleMember.schedule_id.in_(
-                    session.query(PaymentSchedule.id).filter_by(organization_id=org.id)
-                ),
-                PaymentScheduleMember.user_id == str(user.id)
-            ).delete(synchronize_session=False)
+            # Remove member from active payment schedules
+            active_schedules = session.query(PaymentSchedule).filter_by(
+                organization_id=org.id
+            ).all()
+            
+            removed_from_schedules = 0
+            for schedule in active_schedules:
+                schedule_member = session.query(PaymentScheduleMember).filter_by(
+                    schedule_id=schedule.id,
+                    user_id=str(user.id)
+                ).first()
+                if schedule_member:
+                    session.delete(schedule_member)
+                    removed_from_schedules += 1
 
-            # Remove the member
+            # Remove the member from the organization
+            joined_at = member.joined_at  # Store for the success message
             session.delete(member)
             session.commit()
 
-            # Send success message
             embed = create_success_embed(
                 title="Member Removed",
                 description=(
                     f"Successfully removed {user.mention} from **{organization_name}**!\n\n"
-                    "**Organization Details**\n"
-                    f"• Name: {org.name}\n"
-                    f"• Owner: <@{org.owner_id}>\n"
-                    f"• Removed: <t:{int(datetime.utcnow().timestamp())}:R>"
+                    "**📊 Updates**\n"
+                    "• Removed from organization roster\n"
+                    f"• Removed from {removed_from_schedules} active payment schedule(s)\n"
+                    f"• Was a member for: {discord.utils.format_dt(joined_at, style='R')}"
                 )
             )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
+        except ValueError as e:
+            await interaction.followup.send(
+                embed=create_error_embed(title="Invalid Input", description=str(e)),
+                ephemeral=True
+            )
         except Exception as e:
             session.rollback()
-            await interaction.response.send_message(
-                embed=create_error_embed(
-                    title="Error",
-                    description=f"An error occurred: {str(e)}"
-                ),
+            await interaction.followup.send(
+                embed=create_error_embed(title="Error", description=f"An error occurred: {str(e)}"),
                 ephemeral=True
             )
         finally:
             session.close()
 
     @app_commands.command(
-        name="transfer_ownership",
-        description="Transfer ownership of your organization to another member"
+        name="cancel_schedule",
+        description="Cancel an existing payment schedule"
+    )
+    @app_commands.describe(
+        schedule_id="The ID of the schedule to cancel"
+    )
+    async def cancel_schedule(
+        self,
+        interaction: discord.Interaction,
+        schedule_id: int
+    ):
+        await interaction.response.defer(ephemeral=True)
+        
+        session = self.bot.db_manager.Session()
+        try:
+            # Find the schedule
+            schedule = session.query(PaymentSchedule).filter_by(id=schedule_id).first()
+            if not schedule:
+                raise ValueError(f"Schedule #{schedule_id} not found!")
+
+            # Check permissions
+            if schedule.organization_id:
+                # Organization schedule
+                org = session.query(Organization).filter_by(id=schedule.organization_id).first()
+                if str(interaction.user.id) != org.owner_id:
+                    raise ValueError("Only the organization owner can cancel this schedule!")
+            else:
+                # Individual schedule
+                if str(interaction.user.id) != schedule.created_by:
+                    raise ValueError("Only the schedule creator can cancel this schedule!")
+
+            # Create confirmation view
+            confirm_view = ConfirmationView()
+            confirm_embed = create_basic_embed(
+                title="Confirm Schedule Cancellation",
+                description=(
+                    f"Are you sure you want to cancel payment schedule **#{schedule_id}**?\n\n"
+                    "**Schedule Details**\n"
+                    f"• Amount per payment: {schedule.amount:,} points\n"
+                    f"• Points paid: {schedule.points_paid:,}/{schedule.total_points:,}\n"
+                    f"• Created: {discord.utils.format_dt(schedule.created_at, style='R')}\n\n"
+                    "**⚠️ Warning**\n"
+                    "• This action cannot be undone\n"
+                    "• Remaining points will not be distributed\n"
+                    "• All schedule data will be deleted"
+                )
+            )
+            
+            await interaction.followup.send(embed=confirm_embed, view=confirm_view, ephemeral=True)
+            
+            # Wait for confirmation
+            await confirm_view.wait()
+            
+            if confirm_view.value:
+                # Remove schedule members first
+                session.query(PaymentScheduleMember).filter_by(
+                    schedule_id=schedule.id
+                ).delete()
+
+                # Store info for success message
+                points_remaining = schedule.total_points - schedule.points_paid
+                duration = discord.utils.format_dt(schedule.created_at, style='R')
+
+                # Remove the schedule
+                session.delete(schedule)
+                session.commit()
+
+                success_embed = create_success_embed(
+                    title="Schedule Cancelled",
+                    description=(
+                        f"Successfully cancelled payment schedule **#{schedule_id}**!\n\n"
+                        "** Final Statistics**\n"
+                        f"• Total points distributed: {schedule.points_paid:,}\n"
+                        f"• Remaining points: {points_remaining:,}\n"
+                        f"• Active duration: {duration} to now"
+                    )
+                )
+                await interaction.edit_original_response(embed=success_embed, view=None)
+            else:
+                await interaction.edit_original_response(
+                    embed=create_basic_embed(
+                        title="Cancellation Aborted",
+                        description="The schedule cancellation was cancelled."
+                    ),
+                    view=None
+                )
+
+        except ValueError as e:
+            await interaction.followup.send(
+                embed=create_error_embed(title="Invalid Input", description=str(e)),
+                ephemeral=True
+            )
+        except Exception as e:
+            session.rollback()
+            await interaction.followup.send(
+                embed=create_error_embed(title="Error", description=f"An error occurred: {str(e)}"),
+                ephemeral=True
+            )
+        finally:
+            session.close()
+
+    @app_commands.command(
+        name="transfer_org_ownership",
+        description="Transfer ownership of an organization to another user"
     )
     @app_commands.describe(
         organization_name="Name of the organization",
-        new_owner="The user to transfer ownership to"
+        new_owner="User to transfer ownership to"
     )
-    async def transfer_ownership(
+    async def transfer_org_ownership(
         self,
         interaction: discord.Interaction,
         organization_name: str,
         new_owner: discord.Member
     ):
-        session = self.db.Session()
+        await interaction.response.defer(ephemeral=True)
+        
+        session = self.bot.db_manager.Session()
         try:
-            # Check if org exists and user is owner
+            # Find the organization
             org = session.query(Organization).filter_by(name=organization_name).first()
-            
             if not org:
-                await interaction.response.send_message(
-                    embed=create_error_embed(
-                        title="Organization Not Found",
-                        description=f"No organization named '{organization_name}' exists."
-                    ),
-                    ephemeral=True
-                )
-                return
+                raise ValueError(f"Organization '{organization_name}' not found!")
 
-            # Verify the command user is the owner
+            # Check if user is the current owner
             if str(interaction.user.id) != org.owner_id:
-                await interaction.response.send_message(
-                    embed=create_error_embed(
-                        title="Permission Denied",
-                        description="You must be the organization owner to transfer ownership."
-                    ),
-                    ephemeral=True
-                )
-                return
+                raise ValueError("Only the organization owner can transfer ownership!")
 
             # Check if new owner is already a member
             member = session.query(OrganizationMember).filter_by(
                 organization_id=org.id,
                 user_id=str(new_owner.id)
             ).first()
-
+            
             if not member:
-                # Add new owner as member
-                member = OrganizationMember(
-                    organization_id=org.id,
-                    user_id=str(new_owner.id)
-                )
-                session.add(member)
+                raise ValueError(f"{new_owner.name} must be a member of the organization first!")
 
-            # Create confirmation view
-            confirm_view = ConfirmationView()
-            confirm_embed = create_basic_embed(
-                title="Confirm Ownership Transfer",
+            # Store old owner info for message
+            old_owner = await self.bot.fetch_user(int(org.owner_id))
+
+            # Update ownership
+            org.owner_id = str(new_owner.id)
+            session.commit()
+
+            embed = create_success_embed(
+                title="Ownership Transferred",
                 description=(
-                    f"Are you sure you want to transfer ownership of **{organization_name}** to {new_owner.mention}?\n\n"
-                    "**⚠️ Warning**\n"
-                    "• This action cannot be undone\n"
-                    "• You will lose owner privileges\n"
-                    "• The new owner will have full control"
+                    f"Successfully transferred ownership of **{organization_name}**!\n\n"
+                    "**📊 Details**\n"
+                    f"• Previous Owner: {old_owner.mention}\n"
+                    f"• New Owner: {new_owner.mention}\n"
+                    f"• Transferred: <t:{int(datetime.utcnow().timestamp())}:R>"
                 )
             )
-            
-            await interaction.response.send_message(embed=confirm_embed, view=confirm_view, ephemeral=True)
-            
-            # Wait for confirmation
-            await confirm_view.wait()
-            if confirm_view.value:
-                old_owner = org.owner_id
-                org.owner_id = str(new_owner.id)
-                session.commit()
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
-                success_embed = create_success_embed(
-                    title="Ownership Transferred",
-                    description=(
-                        f"Successfully transferred ownership of **{organization_name}**!\n\n"
-                        "**Organization Details**\n"
-                        f"• Name: {org.name}\n"
-                        f"• Previous Owner: <@{old_owner}>\n"
-                        f"• New Owner: {new_owner.mention}\n"
-                        f"• Transferred: <t:{int(datetime.utcnow().timestamp())}:R>"
-                    )
-                )
-                await interaction.edit_original_response(embed=success_embed, view=None)
-
-                # Try to notify new owner
-                try:
-                    notify_embed = create_success_embed(
-                        title="Organization Ownership Received",
-                        description=(
-                            f"You are now the owner of **{organization_name}**!\n\n"
-                            "**Organization Details**\n"
-                            f"• Name: {org.name}\n"
-                            f"• Previous Owner: <@{old_owner}>\n"
-                            f"• Transferred: <t:{int(datetime.utcnow().timestamp())}:R>\n\n"
-                            "**Available Commands**\n"
-                            "• `/add_member` - Add new members\n"
-                            "• `/remove_member` - Remove members\n"
-                            "• `/transfer_ownership` - Transfer ownership"
-                        )
-                    )
-                    await new_owner.send(embed=notify_embed)
-                except:
-                    pass  # Ignore if DM fails
-
-            else:
-                cancel_embed = create_basic_embed(
-                    title="Transfer Cancelled",
-                    description="The ownership transfer was cancelled."
-                )
-                await interaction.edit_original_response(embed=cancel_embed, view=None)
-
-        except Exception as e:
-            session.rollback()
+        except ValueError as e:
             await interaction.followup.send(
-                embed=create_error_embed(
-                    title="Error",
-                    description=f"An error occurred: {str(e)}"
-                ),
+                embed=create_error_embed(title="Invalid Input", description=str(e)),
                 ephemeral=True
             )
         finally:
             session.close()
 
-async def setup(bot: commands.Bot) -> None:
+    @app_commands.command(
+        name="pay_org",
+        description="Create an automated payment schedule for an organization"
+    )
+    @app_commands.describe(
+        organization_name="Name of the organization",
+        amount="Amount of points per payment",
+        interval_value="How often to make payments (e.g., 24)",
+        interval_type="Time unit for interval (s/m/h/d/mm)",
+        total_points="Total points to distribute over time"
+    )
+    async def pay_org(
+        self,
+        interaction: discord.Interaction,
+        organization_name: str,
+        amount: int,
+        interval_value: int,
+        interval_type: str,
+        total_points: int
+    ):
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # Validate inputs
+            if amount <= 0 or interval_value <= 0 or total_points <= 0:
+                raise ValueError("All numerical values must be positive!")
+
+            valid_intervals = [t.value for t in IntervalType]
+            if interval_type.lower() not in valid_intervals:
+                raise ValueError(f"Invalid interval type! Use: {', '.join(valid_intervals)}")
+
+            if total_points < amount:
+                raise ValueError("Total points must be greater than or equal to amount per payment!")
+
+            session = self.bot.db_manager.Session()
+            try:
+                # Get organization
+                org = session.query(Organization).filter_by(name=organization_name).first()
+                if not org:
+                    raise ValueError(f"Organization '{organization_name}' not found!")
+
+                # Get members
+                members = session.query(OrganizationMember).filter_by(organization_id=org.id).all()
+                if not members:
+                    raise ValueError("Organization has no members!")
+
+                # Create payment schedule
+                schedule = PaymentSchedule(
+                    organization_id=org.id,
+                    amount=amount,
+                    interval_type=IntervalType(interval_type.lower()),
+                    interval_value=interval_value,
+                    total_points=total_points,
+                    points_paid=0,
+                    created_by=str(interaction.user.id),
+                    last_paid_at=datetime.utcnow()
+                )
+                session.add(schedule)
+                session.flush()
+
+                # Add members to schedule
+                for member in members:
+                    schedule_member = PaymentScheduleMember(
+                        schedule_id=schedule.id,
+                        user_id=member.user_id
+                    )
+                    session.add(schedule_member)
+
+                # Calculate how many payments are needed
+                number_of_payments = total_points // amount
+                if total_points % amount != 0:
+                    number_of_payments += 1  # Add one more payment if there's a remainder
+
+                # Calculate points per member for initial payment
+                points_per_member = amount // len(members)
+                successful_distributions = 0
+
+                # Make initial payment
+                for member in members:
+                    try:
+                        await self.bot.points_manager.add_points(
+                            user_id=int(member.user_id),
+                            amount=points_per_member
+                        )
+                        successful_distributions += 1
+
+                        # Send DM notification
+                        user = await self.bot.fetch_user(int(member.user_id))
+                        progress_percentage = (points_per_member / total_points) * 100
+                        filled_blocks = int((progress_percentage / 100) * 10)
+                        empty_blocks = 10 - filled_blocks
+                        progress_bar = '█' * filled_blocks + '░' * empty_blocks
+
+                        dm_embed = create_success_embed(
+                            title="Payment Received",
+                            description=(
+                                "**Organization Payment**\n"
+                                "You've received a scheduled payment!\n\n"
+                                f"💰 **Amount Received**\n{points_per_member:,} points\n\n"
+                                f"📊 **Schedule Progress**\n{progress_bar} {progress_percentage:.1f}%\n"
+                                f"({schedule.points_paid + points_per_member}/{schedule.total_points} points)\n\n"
+                                f"⏰ **Payment Details**\n"
+                                f"• Frequency: Every {interval_value} {interval_type}\n"
+                                f"• Organization: {org.name}\n"
+                                f"• Schedule ID: #{schedule.id}\n\n"
+                                f"👥 Organization Payment • Automated Payment"
+                            )
+                        )
+                        await user.send(embed=dm_embed)
+
+                    except Exception as e:
+                        print(f"Error distributing points to {member.user_id}: {e}")
+
+                if successful_distributions > 0:
+                    schedule.points_paid += points_per_member * successful_distributions
+                    schedule.last_paid_at = datetime.utcnow()
+                    session.commit()
+
+                # Send success message
+                embed = create_success_embed(
+                    title="Payment Schedule Created",
+                    description=(
+                        f"Created organization payment schedule!\n\n"
+                        "**📊 Schedule Details**\n"
+                        f"• Amount per payment: {amount:,} points\n"
+                        f"• Interval: Every {interval_value} {interval_type}\n"
+                        f"• Members: {len(members)}\n"
+                        f"• Points per member: {points_per_member:,}\n"
+                        f"• Total points: {total_points:,}\n"
+                        f"• Schedule ID: #{schedule.id}\n\n"
+                        "**💰 Initial Payment**\n"
+                        f"• Successful distributions: {successful_distributions}/{len(members)}\n"
+                        f"• Points distributed: {schedule.points_paid:,}"
+                    )
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+
+            except Exception as e:
+                session.rollback()
+                raise ValueError(f"Error creating schedule: {str(e)}")
+            finally:
+                session.close()
+
+        except ValueError as e:
+            await interaction.followup.send(
+                embed=create_error_embed(title="Invalid Input", description=str(e)),
+                ephemeral=True
+            )
+
+    async def remove_member_from_schedules(self, session, org_id: int, user_id: str):
+        """Remove a member from all active payment schedules in an organization"""
+        schedules = session.query(PaymentSchedule)\
+            .filter_by(organization_id=org_id)\
+            .all()
+        
+        for schedule in schedules:
+            session.query(PaymentScheduleMember)\
+                .filter_by(
+                    schedule_id=schedule.id,
+                    user_id=user_id
+                ).delete()
+
+async def setup(bot):
     await bot.add_cog(Organizations(bot))

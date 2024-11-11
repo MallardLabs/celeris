@@ -123,6 +123,12 @@ class DiscordBot(commands.Bot):
             await self.load_extension("cogs.menu")
             print("Extensions loaded")
             
+            # Load cogs
+            await self.load_extension("cogs.organizations")
+            
+            # Sync commands
+            await self.tree.sync()
+            
         except Exception as e:
             print(f"Error in setup: {e}")
             raise  # Re-raise to see full traceback

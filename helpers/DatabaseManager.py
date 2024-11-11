@@ -1,8 +1,12 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
 from models.database import Base
 import os
-from sqlalchemy import text
+import logging
+
+# Disable SQLAlchemy logging
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 
 class DatabaseManager:
     _instance = None
@@ -33,11 +37,16 @@ class DatabaseManager:
                     if os.path.exists(db_file):
                         os.remove(db_file)
         
-        # Create engine with proper permissions
+        # Configure engine with larger pool size and shorter timeout
         self.engine = create_engine(
             self.db_url,
-            connect_args={'check_same_thread': False},
-            echo=True  # Enable SQL logging
+            poolclass=QueuePool,
+            pool_size=20,  # Increase from default 5
+            max_overflow=30,  # Increase from default 10
+            pool_timeout=30,  # Connection timeout in seconds
+            pool_pre_ping=True,  # Verify connection before using
+            pool_recycle=3600,  # Recycle connections after 1 hour
+            connect_args={'check_same_thread': False} if self.db_url.startswith('sqlite') else {}
         )
         
         Base.metadata.create_all(self.engine)
@@ -69,3 +78,11 @@ class DatabaseManager:
                 os.remove(db_file)
         
         Base.metadata.create_all(self.engine)
+
+    async def get_session(self):
+        """Get a database session with automatic cleanup"""
+        session = self.Session()
+        try:
+            yield session
+        finally:
+            session.close()

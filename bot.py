@@ -1,6 +1,7 @@
 import logging
 import os
 import platform
+import webserver
 
 import discord
 from discord.ext import commands
@@ -158,4 +159,5 @@ class DiscordBot(commands.Bot):
 load_dotenv(override=True)
 
 bot = DiscordBot()
+webserver.keep_alive()
 bot.run(os.getenv("DISCORD_TOKEN"))
